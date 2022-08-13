@@ -10,12 +10,13 @@ import numpy as np
 from torchvision import datasets, transforms
 import torch
 
-from utils.sampling import mnist_iid, mnist_noniid, cifar_iid
+from utils.sampling import mnist_iid, mnist_noniid, cifar_iid, Heartbeat_iid, Heartbeat_noniid
 from utils.options import args_parser
 from models.Update import LocalUpdate
-from models.Nets import MLP, CNNMnist, CNNCifar
+from models.Nets import MLP, CNNMnist, CNNCifar, CNNHeart
 from models.Fed import FedAvg
 from models.test import test_img
+import pandas as pd
 
 
 if __name__ == '__main__':
@@ -41,6 +42,19 @@ if __name__ == '__main__':
             dict_users = cifar_iid(dataset_train, args.num_users)
         else:
             exit('Error: only consider IID setting in CIFAR10')
+    elif args.dataset == 'Heartbeat':
+        X  = pd.read_csv('mitbih_train.csv')
+        X  = X.drop(X.columns[0],axis=1).values
+        Y  = pd.read_csv('mitbih_test.csv')
+        Y  = Y.drop(Y.columns[0],axis=1).values
+        dataset_train  = torch.utils.data.TensorDataset(torch.FloatTensor(X[:, 0:185]), torch.LongTensor(X[:, 186].astype(int)))
+        dataset_test   = torch.utils.data.TensorDataset(torch.FloatTensor(Y[:, 0:185]), torch.LongTensor(Y[:, 186].astype(int)))
+        # sample users
+        if args.iid:
+            dict_users = Heartbeat_iid(dataset_train, args.num_users)
+        else:
+            dict_users = Heartbeat_noniid(dataset_train, args.num_users)
+
     else:
         exit('Error: unrecognized dataset')
     img_size = dataset_train[0][0].shape
@@ -50,6 +64,8 @@ if __name__ == '__main__':
         net_glob = CNNCifar(args=args).to(args.device)
     elif args.model == 'cnn' and args.dataset == 'mnist':
         net_glob = CNNMnist(args=args).to(args.device)
+    elif args.model == 'cnn' and args.dataset == 'Heartbeat':
+        net_glob = CNNHeart(args=args).to(args.device)
     elif args.model == 'mlp':
         len_in = 1
         for x in img_size:
@@ -60,11 +76,15 @@ if __name__ == '__main__':
     print(net_glob)
     net_glob.train()
 
+    acc_train1  = []
     # copy weights
     w_glob = net_glob.state_dict()
+    acc_train, _ = test_img(net_glob, dataset_test, args)
+    acc_train1.append(acc_train)
 
     # training
     loss_train = []
+    
     cv_loss, cv_acc = [], []
     val_loss_pre, counter = 0, 0
     net_best = None
@@ -76,18 +96,20 @@ if __name__ == '__main__':
         w_locals = [w_glob for i in range(args.num_users)]
     for iter in range(args.epochs):
         loss_locals = []
+        acc_locals = []
         if not args.all_clients:
             w_locals = []
         m = max(int(args.frac * args.num_users), 1)
         idxs_users = np.random.choice(range(args.num_users), m, replace=False)
         for idx in idxs_users:
             local = LocalUpdate(args=args, dataset=dataset_train, idxs=dict_users[idx])
-            w, loss = local.train(net=copy.deepcopy(net_glob).to(args.device))
+            w, loss, acc111 = local.train(net=copy.deepcopy(net_glob).to(args.device)) # Modified
             if args.all_clients:
                 w_locals[idx] = copy.deepcopy(w)
             else:
                 w_locals.append(copy.deepcopy(w))
             loss_locals.append(copy.deepcopy(loss))
+            acc_locals.append(copy.deepcopy(acc111))
         # update global weights
         w_glob = FedAvg(w_locals)
 
@@ -98,13 +120,15 @@ if __name__ == '__main__':
         loss_avg = sum(loss_locals) / len(loss_locals)
         print('Round {:3d}, Average loss {:.3f}'.format(iter, loss_avg))
         loss_train.append(loss_avg)
-
+        acc_train, _ = test_img(net_glob, dataset_test, args)
+        #acc_train.append(sum(acc_locals) / len(acc_locals))
+        acc_train1.append(acc_train)
     # plot loss curve
     plt.figure()
-    plt.plot(range(len(loss_train)), loss_train)
-    plt.ylabel('train_loss')
+    plt.plot(range(len(acc_train1)), acc_train1)
+    plt.ylabel('train_acc')
     plt.savefig('./save/fed_{}_{}_{}_C{}_iid{}.png'.format(args.dataset, args.model, args.epochs, args.frac, args.iid))
-
+    np.savetxt('HeartShare50epochs150.txt', acc_train1)
     # testing
     net_glob.eval()
     acc_train, loss_train = test_img(net_glob, dataset_train, args)
